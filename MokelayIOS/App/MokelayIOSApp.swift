@@ -10,7 +10,7 @@ struct MokelayIOSApp: App {
 
     private var rootView: some View {
         let view = NavigationView {
-            PageScreen(uuid: "index")
+            HomeScreen()
         }
 
         #if os(iOS)
