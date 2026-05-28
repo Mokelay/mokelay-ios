@@ -1,5 +1,6 @@
 import SwiftUI
 #if os(iOS)
+import AVFoundation
 import UIKit
 #elseif os(macOS)
 import AppKit
@@ -9,6 +10,8 @@ struct HomeScreen: View {
     @State private var pageUUID = ""
     @State private var destinationUUID: String?
     @State private var isShowingPage = false
+    @State private var isShowingScanner = false
+    @State private var scanErrorMessage = ""
     @FocusState private var isUUIDFieldFocused: Bool
 
     private var trimmedUUID: String {
@@ -32,6 +35,10 @@ struct HomeScreen: View {
                 VStack(spacing: 16) {
                     uuidInput
                     jumpButton
+                    #if os(iOS)
+                    scanButton
+                    #endif
+                    scanErrorText
                 }
                 .frame(maxWidth: 520)
 
@@ -52,7 +59,11 @@ struct HomeScreen: View {
         }
 
         #if os(iOS)
-        return view.navigationBarHidden(true)
+        return view
+            .sheet(isPresented: $isShowingScanner) {
+                QRCodeScannerSheet(onCodeScanned: handleScannedCode)
+            }
+            .navigationBarHidden(true)
         #else
         return view
         #endif
@@ -116,14 +127,57 @@ struct HomeScreen: View {
         .disabled(!canNavigate)
     }
 
+    #if os(iOS)
+    private var scanButton: some View {
+        Button {
+            scanErrorMessage = ""
+            isShowingScanner = true
+        } label: {
+            Label("扫描二维码", systemImage: "qrcode.viewfinder")
+                .font(.body.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+    }
+    #endif
+
+    @ViewBuilder
+    private var scanErrorText: some View {
+        if !scanErrorMessage.isEmpty {
+            Text(scanErrorMessage)
+                .font(.footnote)
+                .foregroundColor(.red)
+                .multilineTextAlignment(.center)
+        }
+    }
+
     private func navigateToPage() {
         guard canNavigate else {
             return
         }
 
-        destinationUUID = trimmedUUID
+        navigateToPage(uuid: trimmedUUID)
+    }
+
+    private func navigateToPage(uuid: String) {
+        destinationUUID = uuid
         isUUIDFieldFocused = false
         isShowingPage = true
+    }
+
+    private func handleScannedCode(_ scannedText: String) {
+        guard let uuid = extractPageUUID(from: scannedText) else {
+            scanErrorMessage = "未识别到 Mokelay 预览地址"
+            isShowingScanner = false
+            return
+        }
+
+        scanErrorMessage = ""
+        pageUUID = uuid
+        isShowingScanner = false
+        navigateToPage(uuid: uuid)
     }
 
     private var systemBackgroundColor: Color {
@@ -146,6 +200,302 @@ struct HomeScreen: View {
         #endif
     }
 }
+
+func extractPageUUID(from scannedText: String) -> String? {
+    let trimmedText = scannedText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard !trimmedText.isEmpty else {
+        return nil
+    }
+
+    if UUID(uuidString: trimmedText) != nil {
+        return trimmedText
+    }
+
+    if let url = URL(string: trimmedText) {
+        if let fragment = url.fragment,
+           let uuid = extractPageUUIDFromPreviewPath(fragment) {
+            return uuid
+        }
+
+        if let uuid = extractPageUUIDFromPreviewPath(url.path) {
+            return uuid
+        }
+    }
+
+    if let hashRange = trimmedText.range(of: "#") {
+        let fragment = String(trimmedText[hashRange.upperBound...])
+        if let uuid = extractPageUUIDFromPreviewPath(fragment) {
+            return uuid
+        }
+    }
+
+    return nil
+}
+
+private func extractPageUUIDFromPreviewPath(_ path: String) -> String? {
+    let normalizedPath = path.hasPrefix("/") ? path : "/\(path)"
+    let pathWithoutQuery = normalizedPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? normalizedPath
+    let parts = pathWithoutQuery.split(separator: "/", omittingEmptySubsequences: true)
+
+    guard parts.count == 3,
+          String(parts[0]) == "pages",
+          String(parts[2]) == "preview" else {
+        return nil
+    }
+
+    let encodedUUID = String(parts[1])
+    return encodedUUID.removingPercentEncoding ?? encodedUUID
+}
+
+#if os(iOS)
+private struct QRCodeScannerSheet: View {
+    let onCodeScanned: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var cameraAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                switch cameraAuthorizationStatus {
+                case .authorized:
+                    scannerView
+                case .notDetermined:
+                    permissionPendingView
+                case .denied, .restricted:
+                    cameraUnavailableView(
+                        title: "无法使用摄像头",
+                        message: "请在系统设置中允许 Mokelay 使用摄像头后再扫描二维码。"
+                    )
+                @unknown default:
+                    cameraUnavailableView(
+                        title: "无法使用摄像头",
+                        message: "当前设备暂不支持二维码扫描。"
+                    )
+                }
+            }
+            .navigationTitle("扫描二维码")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear(perform: requestCameraAccessIfNeeded)
+        }
+    }
+
+    private var scannerView: some View {
+        ZStack {
+            QRCodeScannerView(onCodeScanned: onCodeScanned)
+                .ignoresSafeArea()
+
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.95), lineWidth: 3)
+                .frame(width: 240, height: 240)
+
+            VStack {
+                Spacer()
+                Text("将二维码放入取景框内")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(Capsule())
+                    .padding(.bottom, 42)
+            }
+        }
+    }
+
+    private var permissionPendingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("正在请求摄像头权限...")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func cameraUnavailableView(title: String, message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "camera.fill")
+                .font(.system(size: 36, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            Text(title)
+                .font(.title3.bold())
+
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func requestCameraAccessIfNeeded() {
+        guard cameraAuthorizationStatus == .notDetermined else {
+            return
+        }
+
+        AVCaptureDevice.requestAccess(for: .video) { isGranted in
+            DispatchQueue.main.async {
+                cameraAuthorizationStatus = isGranted ? .authorized : .denied
+            }
+        }
+    }
+}
+
+private struct QRCodeScannerView: UIViewControllerRepresentable {
+    let onCodeScanned: (String) -> Void
+
+    func makeUIViewController(context: Context) -> QRCodeScannerViewController {
+        let viewController = QRCodeScannerViewController()
+        viewController.onCodeScanned = context.coordinator.handleScannedCode
+        return viewController
+    }
+
+    func updateUIViewController(_ uiViewController: QRCodeScannerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onCodeScanned: onCodeScanned)
+    }
+
+    final class Coordinator {
+        private let onCodeScanned: (String) -> Void
+        private var hasScannedCode = false
+
+        init(onCodeScanned: @escaping (String) -> Void) {
+            self.onCodeScanned = onCodeScanned
+        }
+
+        func handleScannedCode(_ code: String) {
+            guard !hasScannedCode else {
+                return
+            }
+
+            hasScannedCode = true
+            onCodeScanned(code)
+        }
+    }
+}
+
+private final class QRCodeScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    var onCodeScanned: ((String) -> Void)?
+
+    private let captureSession = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var didConfigureSession = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        configureCaptureSession()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.bounds
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        startCaptureSession()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        stopCaptureSession()
+    }
+
+    private func configureCaptureSession() {
+        guard !didConfigureSession else {
+            return
+        }
+
+        guard let videoDevice = AVCaptureDevice.default(for: .video),
+              let videoInput = try? AVCaptureDeviceInput(device: videoDevice),
+              captureSession.canAddInput(videoInput) else {
+            showConfigurationError()
+            return
+        }
+
+        captureSession.addInput(videoInput)
+
+        let metadataOutput = AVCaptureMetadataOutput()
+        guard captureSession.canAddOutput(metadataOutput) else {
+            showConfigurationError()
+            return
+        }
+
+        captureSession.addOutput(metadataOutput)
+        metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+        metadataOutput.metadataObjectTypes = [.qr]
+
+        let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.frame = view.bounds
+        view.layer.addSublayer(previewLayer)
+        self.previewLayer = previewLayer
+        didConfigureSession = true
+    }
+
+    private func startCaptureSession() {
+        guard didConfigureSession, !captureSession.isRunning else {
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [captureSession] in
+            captureSession.startRunning()
+        }
+    }
+
+    private func stopCaptureSession() {
+        guard captureSession.isRunning else {
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [captureSession] in
+            captureSession.stopRunning()
+        }
+    }
+
+    private func showConfigurationError() {
+        let label = UILabel()
+        label.text = "无法启动摄像头"
+        label.textColor = .white
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+    }
+
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard let metadataObject = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              metadataObject.type == .qr,
+              let scannedValue = metadataObject.stringValue else {
+            return
+        }
+
+        stopCaptureSession()
+        onCodeScanned?(scannedValue)
+    }
+}
+#endif
 
 private extension View {
     @ViewBuilder
