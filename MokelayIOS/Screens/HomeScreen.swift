@@ -8,7 +8,8 @@ import AppKit
 
 struct HomeScreen: View {
     @State private var pageUUID = ""
-    @State private var destinationUUID: String?
+    @State private var isSystemPage = false
+    @State private var destination: PageDestination?
     @State private var isShowingPage = false
     @State private var isShowingScanner = false
     @State private var scanErrorMessage = ""
@@ -34,6 +35,7 @@ struct HomeScreen: View {
 
                 VStack(spacing: 16) {
                     uuidInput
+                    systemPageCheckbox
                     jumpButton
                     #if os(iOS)
                     scanButton
@@ -43,8 +45,8 @@ struct HomeScreen: View {
                 .frame(maxWidth: 520)
 
                 NavigationLink(isActive: $isShowingPage) {
-                    if let destinationUUID {
-                        PageScreen(uuid: destinationUUID)
+                    if let destination {
+                        PageScreen(uuid: destination.uuid, source: destination.source)
                     } else {
                         EmptyView()
                     }
@@ -115,6 +117,29 @@ struct HomeScreen: View {
         .shadow(color: Color.black.opacity(0.06), radius: 16, x: 0, y: 8)
     }
 
+    private var systemPageCheckbox: some View {
+        Button {
+            isSystemPage.toggle()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isSystemPage ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundColor(isSystemPage ? .accentColor : .secondary)
+
+                Text("是否内置页面")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(.primary)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("是否内置页面")
+        .accessibilityValue(isSystemPage ? "已选择" : "未选择")
+    }
+
     private var jumpButton: some View {
         Button(action: navigateToPage) {
             Text("跳转")
@@ -158,26 +183,27 @@ struct HomeScreen: View {
             return
         }
 
-        navigateToPage(uuid: trimmedUUID)
+        navigateToPage(manualPageDestination(uuid: trimmedUUID, isSystemPage: isSystemPage))
     }
 
-    private func navigateToPage(uuid: String) {
-        destinationUUID = uuid
+    private func navigateToPage(_ destination: PageDestination) {
+        self.destination = destination
         isUUIDFieldFocused = false
         isShowingPage = true
     }
 
     private func handleScannedCode(_ scannedText: String) {
-        guard let uuid = extractPageUUID(from: scannedText) else {
+        guard let destination = extractPageDestination(from: scannedText) else {
             scanErrorMessage = "未识别到 Mokelay 预览地址"
             isShowingScanner = false
             return
         }
 
         scanErrorMessage = ""
-        pageUUID = uuid
+        pageUUID = destination.uuid
+        isSystemPage = destination.source == .system
         isShowingScanner = false
-        navigateToPage(uuid: uuid)
+        navigateToPage(destination)
     }
 
     private var systemBackgroundColor: Color {
@@ -201,7 +227,23 @@ struct HomeScreen: View {
     }
 }
 
+struct PageDestination: Equatable {
+    let uuid: String
+    let source: PageSource
+}
+
 func extractPageUUID(from scannedText: String) -> String? {
+    extractPageDestination(from: scannedText)?.uuid
+}
+
+func manualPageDestination(uuid: String, isSystemPage: Bool) -> PageDestination {
+    PageDestination(
+        uuid: uuid.trimmingCharacters(in: .whitespacesAndNewlines),
+        source: isSystemPage ? .system : .user
+    )
+}
+
+func extractPageDestination(from scannedText: String) -> PageDestination? {
     let trimmedText = scannedText.trimmingCharacters(in: .whitespacesAndNewlines)
 
     guard !trimmedText.isEmpty else {
@@ -209,24 +251,24 @@ func extractPageUUID(from scannedText: String) -> String? {
     }
 
     if UUID(uuidString: trimmedText) != nil {
-        return trimmedText
+        return PageDestination(uuid: trimmedText, source: .user)
     }
 
     if let url = URL(string: trimmedText) {
         if let fragment = url.fragment,
-           let uuid = extractPageUUIDFromPreviewPath(fragment) {
-            return uuid
+           let destination = extractPageDestinationFromPreviewPath(fragment) {
+            return destination
         }
 
-        if let uuid = extractPageUUIDFromPreviewPath(url.path) {
-            return uuid
+        if let destination = extractPageDestinationFromPreviewPath(url.path, fallbackQuery: url.query) {
+            return destination
         }
     }
 
     if let hashRange = trimmedText.range(of: "#") {
         let fragment = String(trimmedText[hashRange.upperBound...])
-        if let uuid = extractPageUUIDFromPreviewPath(fragment) {
-            return uuid
+        if let destination = extractPageDestinationFromPreviewPath(fragment) {
+            return destination
         }
     }
 
@@ -234,18 +276,36 @@ func extractPageUUID(from scannedText: String) -> String? {
 }
 
 private func extractPageUUIDFromPreviewPath(_ path: String) -> String? {
+    extractPageDestinationFromPreviewPath(path)?.uuid
+}
+
+private func extractPageDestinationFromPreviewPath(_ path: String, fallbackQuery: String? = nil) -> PageDestination? {
     let normalizedPath = path.hasPrefix("/") ? path : "/\(path)"
-    let pathWithoutQuery = normalizedPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? normalizedPath
+    let pathParts = normalizedPath.split(separator: "?", maxSplits: 1).map(String.init)
+    let pathWithoutQuery = pathParts.first ?? normalizedPath
+    let query = pathParts.count > 1 ? pathParts[1] : fallbackQuery
     let parts = pathWithoutQuery.split(separator: "/", omittingEmptySubsequences: true)
 
-    guard parts.count == 3,
+    guard (parts.count == 2 || parts.count == 3),
           String(parts[0]) == "pages",
-          String(parts[2]) == "preview" else {
+          parts.count == 2 || String(parts[2]) == "preview" else {
         return nil
     }
 
     let encodedUUID = String(parts[1])
-    return encodedUUID.removingPercentEncoding ?? encodedUUID
+    let source = querySource(query) ?? .user
+    return PageDestination(uuid: encodedUUID.removingPercentEncoding ?? encodedUUID, source: source)
+}
+
+private func querySource(_ query: String?) -> PageSource? {
+    guard let query else {
+        return nil
+    }
+
+    var components = URLComponents()
+    components.query = query
+    let sourceValue = components.queryItems?.first(where: { $0.name == "source" })?.value
+    return sourceValue == "system" ? .system : .user
 }
 
 #if os(iOS)

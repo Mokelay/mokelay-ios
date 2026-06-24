@@ -1,5 +1,10 @@
 import Foundation
 
+enum PageSource: String, Codable, Equatable {
+    case user
+    case system
+}
+
 final class MokelayPageAPI {
     static let shared = MokelayPageAPI()
 
@@ -14,19 +19,22 @@ final class MokelayPageAPI {
     let baseURL: URL
     private let session: URLSession
     private let decoder: JSONDecoder
+    private let encoder: JSONEncoder
 
     init(
         baseURL: URL = MokelayPageAPI.defaultBaseURL,
         session: URLSession = .shared,
-        decoder: JSONDecoder = JSONDecoder()
+        decoder: JSONDecoder = JSONDecoder(),
+        encoder: JSONEncoder = JSONEncoder()
     ) {
         self.baseURL = baseURL
         self.session = session
         self.decoder = decoder
+        self.encoder = encoder
     }
 
-    func fetchPage(uuid: String) async throws -> MokelayPage {
-        let url = try makeReadPageURL(uuid: uuid)
+    func fetchPage(uuid: String, source: PageSource = .user) async throws -> MokelayPage {
+        let url = try makeReadPageURL(uuid: uuid, source: source)
         let (data, response) = try await session.data(from: url)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -50,9 +58,37 @@ final class MokelayPageAPI {
         return page
     }
 
-    private func makeReadPageURL(uuid: String) throws -> URL {
+    func sendJSONRequest(url: URL, method: String, headers: [String: String] = [:], body: JSONValue? = nil) async throws -> JSONValue {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+
+        headers.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        if let body {
+            request.httpBody = try encoder.encode(body)
+            if request.value(forHTTPHeaderField: "Content-Type") == nil {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
+        }
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MokelayPageAPIError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw MokelayPageAPIError.httpStatus(httpResponse.statusCode)
+        }
+
+        return try decoder.decode(JSONValue.self, from: data)
+    }
+
+    private func makeReadPageURL(uuid: String, source: PageSource) throws -> URL {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-        components?.path = "/api/mokelay/read_page_by_uuid"
+        components?.path = source == .system ? "/api/mokelay/read_mokelay_page_json" : "/api/mokelay/read_page_by_uuid"
         components?.queryItems = [
             URLQueryItem(name: "uuid", value: uuid)
         ]

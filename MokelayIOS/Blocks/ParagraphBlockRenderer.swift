@@ -16,7 +16,7 @@ struct ParagraphBlockRenderer: MokelayBlockRenderer {
     }
 }
 
-private extension String {
+extension String {
     func mokelayPlainTextFromHTML() -> String {
         replacingOccurrences(
             of: "<[^>]+>",

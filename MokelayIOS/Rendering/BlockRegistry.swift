@@ -7,6 +7,10 @@ final class BlockRegistry {
     static func defaultRegistry() -> BlockRegistry {
         let registry = BlockRegistry()
         registry.register(ParagraphBlockRenderer())
+        registry.register(MButtonBlockRenderer())
+        registry.register(MInputBlockRenderer())
+        registry.register(MFormBlockRenderer())
+        registry.register(MAdvanceTableBlockRenderer())
         return registry
     }
 

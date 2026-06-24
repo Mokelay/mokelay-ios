@@ -3,14 +3,13 @@ import SwiftUI
 struct PageRenderer: View {
     let page: MokelayPage
     let registry: BlockRegistry
-    let apiClient: MokelayPageAPI
-    let onNavigateToPage: (String) -> Void
+    @ObservedObject var runtime: MokelayRuntime
 
     var body: some View {
         let context = RenderContext(
             pageUUID: page.uuid,
-            apiClient: apiClient,
-            navigateToPage: onNavigateToPage
+            registry: registry,
+            runtime: runtime
         )
 
         VStack(alignment: .leading, spacing: 16) {
@@ -19,5 +18,39 @@ struct PageRenderer: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            registerPageHandle()
+        }
+        .onDisappear {
+            runtime.unregister(id: page.uuid)
+        }
+    }
+
+    private func registerPageHandle() {
+        runtime.register(
+            MokelayBlockRuntimeHandle(
+                id: page.uuid,
+                type: "MPage",
+                getData: {
+                    [
+                        "blocks": .array(page.blocks.map(\.jsonValue))
+                    ]
+                },
+                callMethod: { methodName, _ in
+                    if methodName == "close" {
+                        runtime.dismissDialog()
+                        return .null
+                    }
+
+                    if methodName == "getData" {
+                        return .object([
+                            "blocks": .array(page.blocks.map(\.jsonValue))
+                        ])
+                    }
+
+                    return nil
+                }
+            )
+        )
     }
 }
